@@ -7,8 +7,8 @@
   <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.5.0/dist/socket.io.min.js"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -19,7 +19,8 @@
       const canvasRef = useRef(null);
       const [isDrawing, setIsDrawing] = useState(false);
       const [color, setColor] = useState('#000000');
-      const [mode, setMode] = useState('draw'); // 'draw' or 'erase'
+      const [brushSize, setBrushSize] = useState(5);
+      const [mode, setMode] = useState('draw'); // 'draw', 'erase', 'pan'
       const [offset, setOffset] = useState({ x: 0, y: 0 });
       const [scale, setScale] = useState(1);
       const [startPan, setStartPan] = useState(null);
@@ -28,12 +29,12 @@
 
       useEffect(() => {
         // Initialize Socket.IO
-        socketRef.current = io('https://communitycanvas.onrender.com');
+        socketRef.current = io(window.location.origin);
 
         // Load existing paths
         socketRef.current.on('loadPaths', (paths) => {
           const ctx = canvasRef.current.getContext('2d');
-          paths.forEach((path) => drawPath(ctx, path));
+          redrawCanvas(ctx, paths);
         });
 
         // Receive real-time drawing updates
@@ -58,9 +59,20 @@
         };
         window.addEventListener('resize', resize);
 
+        // Request initial paths
+        socketRef.current.emit('requestPaths');
+
+        // Touch support
+        canvas.addEventListener('touchstart', handleTouchStart);
+        canvas.addEventListener('touchmove', handleTouchMove);
+        canvas.addEventListener('touchend', handleTouchEnd);
+
         return () => {
           socketRef.current.disconnect();
           window.removeEventListener('resize', resize);
+          canvas.removeEventListener('touchstart', handleTouchStart);
+          canvas.removeEventListener('touchmove', handleTouchMove);
+          canvas.removeEventListener('touchend', handleTouchEnd);
         };
       }, []);
 
@@ -70,7 +82,7 @@
         ctx.scale(scale, scale);
         ctx.beginPath();
         ctx.strokeStyle = path.mode === 'erase' ? '#FFFFFF' : path.color;
-        ctx.lineWidth = path.mode === 'erase' ? 10 / scale : 5 / scale;
+        ctx.lineWidth = path.mode === 'erase' ? path.brushSize * 2 / scale : path.brushSize / scale;
         path.points.forEach((point, i) => {
           if (i === 0) {
             ctx.moveTo(point.x, point.y);
@@ -82,38 +94,34 @@
         ctx.restore();
       };
 
-      const redrawCanvas = (ctx) => {
+      const redrawCanvas = (ctx, paths = null) => {
         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-        socketRef.current.emit('requestPaths'); // Request paths to redraw
-        socketRef.current.on('loadPaths', (paths) => {
+        if (paths) {
           paths.forEach((path) => drawPath(ctx, path));
-        });
+        } else {
+          socketRef.current.emit('requestPaths');
+        }
       };
 
-      const startDrawing = (e) => {
+      const startDrawing = (x, y) => {
+        if (mode !== 'draw' && mode !== 'erase') return;
         setIsDrawing(true);
         const ctx = canvasRef.current.getContext('2d');
-        const rect = canvasRef.current.getBoundingClientRect();
-        const x = (e.clientX - rect.left - offset.x) / scale;
-        const y = (e.clientY - rect.top - offset.y) / scale;
-        currentPath.current = { points: [{ x, y }], color, mode };
+        currentPath.current = { points: [{ x, y }], color, mode, brushSize };
         ctx.save();
         ctx.translate(offset.x, offset.y);
         ctx.scale(scale, scale);
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.strokeStyle = mode === 'erase' ? '#FFFFFF' : color;
-        ctx.lineWidth = mode === 'erase' ? 10 / scale : 5 / scale;
+        ctx.lineWidth = mode === 'erase' ? brushSize * 2 / scale : brushSize / scale;
         ctx.stroke();
         ctx.restore();
       };
 
-      const draw = (e) => {
-        if (!isDrawing) return;
+      const draw = (x, y) => {
+        if (!isDrawing || (mode !== 'draw' && mode !== 'erase')) return;
         const ctx = canvasRef.current.getContext('2d');
-        const rect = canvasRef.current.getBoundingClientRect();
-        const x = (e.clientX - rect.left - offset.x) / scale;
-        const y = (e.clientY - rect.top - offset.y) / scale;
         currentPath.current.points.push({ x, y });
         ctx.save();
         ctx.translate(offset.x, offset.y);
@@ -123,36 +131,58 @@
         ctx.restore();
       };
 
+      const startPanning = (x, y) => {
+        if (mode !== 'pan') return;
+        setStartPan({ x: x - offset.x, y: y - offset.y });
+      };
+
+      const pan = (x, y) => {
+        if (!startPan || mode !== 'pan') return;
+        setOffset({
+          x: x - startPan.x,
+          y: y - startPan.y,
+        });
+        redrawCanvas(canvasRef.current.getContext('2d'));
+      };
+
       const stopDrawing = () => {
         if (isDrawing) {
           setIsDrawing(false);
-          socketRef.current.emit('draw', currentPath.current);
-          currentPath.current = null;
+          if (currentPath.current) {
+            socketRef.current.emit('draw', currentPath.current);
+            currentPath.current = null;
+          }
         }
       };
 
       const handleMouseDown = (e) => {
-        if (e.button === 1) { // Middle mouse button for panning
-          setStartPan({ x: e.clientX - offset.x, y: e.clientY - offset.y });
-        } else if (e.button === 0) { // Left mouse button for drawing
-          startDrawing(e);
+        const rect = canvasRef.current.getBoundingClientRect();
+        const x = (e.clientX - rect.left - offset.x) / scale;
+        const y = (e.clientY - rect.top - offset.y) / scale;
+        const clientX = e.clientX;
+        const clientY = e.clientY;
+        if (e.button === 1 || mode === 'pan') {
+          startPanning(clientX, clientY);
+        } else if (e.button === 0) {
+          startDrawing(x, y);
         }
       };
 
       const handleMouseMove = (e) => {
-        if (startPan) {
-          setOffset({
-            x: e.clientX - startPan.x,
-            y: e.clientY - startPan.y,
-          });
-          redrawCanvas(canvasRef.current.getContext('2d'));
+        const rect = canvasRef.current.getBoundingClientRect();
+        const x = (e.clientX - rect.left - offset.x) / scale;
+        const y = (e.clientY - rect.top - offset.y) / scale;
+        const clientX = e.clientX;
+        const clientY = e.clientY;
+        if (startPan || mode === 'pan') {
+          pan(clientX, clientY);
         } else if (isDrawing) {
-          draw(e);
+          draw(x, y);
         }
       };
 
       const handleMouseUp = (e) => {
-        if (e.button === 1) {
+        if (e.button === 1 || mode === 'pan') {
           setStartPan(null);
         } else if (e.button === 0) {
           stopDrawing();
@@ -173,27 +203,114 @@
         redrawCanvas(canvasRef.current.getContext('2d'));
       };
 
+      const handleTouchStart = (e) => {
+        e.preventDefault();
+        const rect = canvasRef.current.getBoundingClientRect();
+        const touch = e.touches[0];
+        const x = (touch.clientX - rect.left - offset.x) / scale;
+        const y = (touch.clientY - rect.top - offset.y) / scale;
+        const clientX = touch.clientX;
+        const clientY = touch.clientY;
+        if (mode === 'pan') {
+          startPanning(clientX, clientY);
+        } else {
+          startDrawing(x, y);
+        }
+      };
+
+      const handleTouchMove = (e) => {
+        e.preventDefault();
+        const rect = canvasRef.current.getBoundingClientRect();
+        const touch = e.touches[0];
+        const x = (touch.clientX - rect.left - offset.x) / scale;
+        const y = (touch.clientY - rect.top - offset.y) / scale;
+        const clientX = touch.clientX;
+        const clientY = touch.clientY;
+        if (startPan || mode === 'pan') {
+          pan(clientX, clientY);
+        } else if (isDrawing) {
+          draw(x, y);
+        }
+      };
+
+      const handleTouchEnd = (e) => {
+        e.preventDefault();
+        if (mode === 'pan') {
+          setStartPan(null);
+        } else {
+          stopDrawing();
+        }
+      };
+
       return (
-        <div className="flex flex-col h-screen">
-          <div className="p-4 bg-gray-100 flex space-x-4">
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
-              className="w-12 h-12"
-            />
-            <button
-              onClick={() => setMode('draw')}
-              className={`px-4 py-2 rounded ${mode === 'draw' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              Draw
-            </button>
-            <button
-              onClick={() => setMode('erase')}
-              className={`px-4 py-2 rounded ${mode === 'erase' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              Erase
-            </button>
+        <div className="flex flex-col h-screen bg-gray-100">
+          <div className="p-4 bg-white shadow-md flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="font-semibold">Tool:</label>
+              <button
+                onClick={() => setMode('draw')}
+                className={`px-3 py-1 rounded-md ${mode === 'draw' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                Draw
+              </button>
+              <button
+                onClick={() => setMode('erase')}
+                className={`px-3 py-1 rounded-md ${mode === 'erase' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                Erase
+              </button>
+              <button
+                onClick={() => setMode('pan')}
+                className={`px-3 py-1 rounded-md ${mode === 'pan' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                Pan
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="font-semibold">Color:</label>
+              <input
+                type="color"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                className="w-8 h-8 rounded"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="font-semibold">Brush Size:</label>
+              <input
+                type="range"
+                min="1"
+                max="20"
+                value={brushSize}
+                onChange={(e) => setBrushSize(Number(e.target.value))}
+                className="w-24"
+              />
+              <span>{brushSize}px</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="font-semibold">Zoom:</label>
+              <button
+                onClick={() => {
+                  const newScale = Math.min(10, scale * 1.1);
+                  setScale(newScale);
+                  redrawCanvas(canvasRef.current.getContext('2d'));
+                }}
+                className="px-3 py-1 bg-gray-200 rounded-md"
+              >
+                +
+              </button>
+              <button
+                onClick={() => {
+                  const newScale = Math.max(0.1, scale * 0.9);
+                  setScale(newScale);
+                  redrawCanvas(canvasRef.current.getContext('2d'));
+                }}
+                className="px-3 py-1 bg-gray-200 rounded-md"
+              >
+                -
+              </button>
+              <span>{Math.round(scale * 100)}%</span>
+            </div>
           </div>
           <canvas
             ref={canvasRef}
@@ -201,7 +318,7 @@
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onWheel={handleWheel}
-            className="flex-grow bg-white"
+            className="flex-grow bg-white cursor-crosshair"
           />
         </div>
       );
