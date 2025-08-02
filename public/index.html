@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinite Whiteboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.5.0/dist/socket.io.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function Whiteboard() {
+      const canvasRef = useRef(null);
+      const [isDrawing, setIsDrawing] = useState(false);
+      const [color, setColor] = useState('#000000');
+      const [mode, setMode] = useState('draw'); // 'draw' or 'erase'
+      const [offset, setOffset] = useState({ x: 0, y: 0 });
+      const [scale, setScale] = useState(1);
+      const [startPan, setStartPan] = useState(null);
+      const socketRef = useRef(null);
+      const currentPath = useRef(null);
+
+      useEffect(() => {
+        // Initialize Socket.IO
+        socketRef.current = io('http://localhost:3001');
+
+        // Load existing paths
+        socketRef.current.on('loadPaths', (paths) => {
+          const ctx = canvasRef.current.getContext('2d');
+          paths.forEach((path) => drawPath(ctx, path));
+        });
+
+        // Receive real-time drawing updates
+        socketRef.current.on('draw', (path) => {
+          const ctx = canvasRef.current.getContext('2d');
+          drawPath(ctx, path);
+        });
+
+        // Initialize canvas
+        const canvas = canvasRef.current;
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Handle window resize
+        const resize = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          redrawCanvas(ctx);
+        };
+        window.addEventListener('resize', resize);
+
+        return () => {
+          socketRef.current.disconnect();
+          window.removeEventListener('resize', resize);
+        };
+      }, []);
+
+      const drawPath = (ctx, path) => {
+        ctx.save();
+        ctx.translate(offset.x, offset.y);
+        ctx.scale(scale, scale);
+        ctx.beginPath();
+        ctx.strokeStyle = path.mode === 'erase' ? '#FFFFFF' : path.color;
+        ctx.lineWidth = path.mode === 'erase' ? 10 / scale : 5 / scale;
+        path.points.forEach((point, i) => {
+          if (i === 0) {
+            ctx.moveTo(point.x, point.y);
+          } else {
+            ctx.lineTo(point.x, point.y);
+          }
+        });
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const redrawCanvas = (ctx) => {
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        socketRef.current.emit('requestPaths'); // Request paths to redraw
+        socketRef.current.on('loadPaths', (paths) => {
+          paths.forEach((path) => drawPath(ctx, path));
+        });
+      };
+
+      const startDrawing = (e) => {
+        setIsDrawing(true);
+        const ctx = canvasRef.current.getContext('2d');
+        const rect = canvasRef.current.getBoundingClientRect();
+        const x = (e.clientX - rect.left - offset.x) / scale;
+        const y = (e.clientY - rect.top - offset.y) / scale;
+        currentPath.current = { points: [{ x, y }], color, mode };
+        ctx.save();
+        ctx.translate(offset.x, offset.y);
+        ctx.scale(scale, scale);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.strokeStyle = mode === 'erase' ? '#FFFFFF' : color;
+        ctx.lineWidth = mode === 'erase' ? 10 / scale : 5 / scale;
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const draw = (e) => {
+        if (!isDrawing) return;
+        const ctx = canvasRef.current.getContext('2d');
+        const rect = canvasRef.current.getBoundingClientRect();
+        const x = (e.clientX - rect.left - offset.x) / scale;
+        const y = (e.clientY - rect.top - offset.y) / scale;
+        currentPath.current.points.push({ x, y });
+        ctx.save();
+        ctx.translate(offset.x, offset.y);
+        ctx.scale(scale, scale);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const stopDrawing = () => {
+        if (isDrawing) {
+          setIsDrawing(false);
+          socketRef.current.emit('draw', currentPath.current);
+          currentPath.current = null;
+        }
+      };
+
+      const handleMouseDown = (e) => {
+        if (e.button === 1) { // Middle mouse button for panning
+          setStartPan({ x: e.clientX - offset.x, y: e.clientY - offset.y });
+        } else if (e.button === 0) { // Left mouse button for drawing
+          startDrawing(e);
+        }
+      };
+
+      const handleMouseMove = (e) => {
+        if (startPan) {
+          setOffset({
+            x: e.clientX - startPan.x,
+            y: e.clientY - startPan.y,
+          });
+          redrawCanvas(canvasRef.current.getContext('2d'));
+        } else if (isDrawing) {
+          draw(e);
+        }
+      };
+
+      const handleMouseUp = (e) => {
+        if (e.button === 1) {
+          setStartPan(null);
+        } else if (e.button === 0) {
+          stopDrawing();
+        }
+      };
+
+      const handleWheel = (e) => {
+        e.preventDefault();
+        const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+        const newScale = Math.max(0.1, Math.min(10, scale * zoomFactor));
+        const rect = canvasRef.current.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const newOffsetX = mouseX - (mouseX - offset.x) * (newScale / scale);
+        const newOffsetY = mouseY - (mouseY - offset.y) * (newScale / scale);
+        setScale(newScale);
+        setOffset({ x: newOffsetX, y: newOffsetY });
+        redrawCanvas(canvasRef.current.getContext('2d'));
+      };
+
+      return (
+        <div className="flex flex-col h-screen">
+          <div className="p-4 bg-gray-100 flex space-x-4">
+            <input
+              type="color"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              className="w-12 h-12"
+            />
+            <button
+              onClick={() => setMode('draw')}
+              className={`px-4 py-2 rounded ${mode === 'draw' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+            >
+              Draw
+            </button>
+            <button
+              onClick={() => setMode('erase')}
+              className={`px-4 py-2 rounded ${mode === 'erase' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
+            >
+              Erase
+            </button>
+          </div>
+          <canvas
+            ref={canvasRef}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onWheel={handleWheel}
+            className="flex-grow bg-white"
+          />
+        </div>
+      );
+    }
+
+    ReactDOM.render(<Whiteboard />, document.getElementById('root'));
+  </script>
+</body>
+</html>
