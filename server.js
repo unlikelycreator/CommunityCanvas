@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
+const cron = require('node-cron');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -21,13 +22,27 @@ const pathSchema = new mongoose.Schema({
   points: [{ x: Number, y: Number }],
   color: String,
   mode: String, // 'draw' or 'erase'
-  brushSize: Number, // Added to support variable brush sizes
+  brushSize: Number,
   timestamp: { type: Date, default: Date.now },
 });
 const Path = mongoose.model('Path', pathSchema);
 
 // Serve static files (React build)
 app.use(express.static('public'));
+
+// Schedule cron job to delete erase paths every 30 minutes
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    console.log('Running cron job to delete erase paths...');
+    const result = await Path.deleteMany({ mode: 'erase' });
+    console.log(`Deleted ${result.deletedCount} erase paths.`);
+    // Notify all connected clients to reload paths
+    const paths = await Path.find();
+    io.emit('loadPaths', paths);
+  } catch (err) {
+    console.error('Error in cron job deleting erase paths:', err);
+  }
+});
 
 // Socket.IO connection
 io.on('connection', (socket) => {
