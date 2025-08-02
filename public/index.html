@@ -28,7 +28,7 @@
 
       useEffect(() => {
         // Initialize Socket.IO
-        socketRef.current = io('http://localhost:3001');
+        socketRef.current = io('https://communitycanvas.onrender.com');
 
         // Load existing paths
         socketRef.current.on('loadPaths', (paths) => {
