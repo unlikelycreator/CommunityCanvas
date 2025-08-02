@@ -7,7 +7,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // MongoDB connection string
-const mongoURI = 'mongodb+srv://iamhritikpawar:pawar2700@bookkeeper.hv4oh.mongodb.net/whiteboard?retryWrites=true&w=majority';
+const mongoURI = process.env.MONGO_URI || 'mongodb+srv://iamhritikpawar:pawar2700@bookkeeper.hv4oh.mongodb.net/whiteboard?retryWrites=true&w=majority';
 
 // Connect to MongoDB
 mongoose.connect(mongoURI, {
@@ -21,6 +21,7 @@ const pathSchema = new mongoose.Schema({
   points: [{ x: Number, y: Number }],
   color: String,
   mode: String, // 'draw' or 'erase'
+  brushSize: Number, // Added to support variable brush sizes
   timestamp: { type: Date, default: Date.now },
 });
 const Path = mongoose.model('Path', pathSchema);
@@ -36,6 +37,16 @@ io.on('connection', (socket) => {
   Path.find().then((paths) => {
     socket.emit('loadPaths', paths);
   }).catch((err) => console.error('Error fetching paths:', err));
+
+  // Handle request for paths
+  socket.on('requestPaths', async () => {
+    try {
+      const paths = await Path.find();
+      socket.emit('loadPaths', paths);
+    } catch (err) {
+      console.error('Error fetching paths:', err);
+    }
+  });
 
   // Handle new drawing path
   socket.on('draw', async (data) => {
@@ -53,6 +64,7 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(3001, () => {
-  console.log('Server running on http://localhost:3001');
+const port = process.env.PORT || 3001;
+server.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
 });
