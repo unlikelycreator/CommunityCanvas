@@ -14,8 +14,10 @@
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
+
     function Whiteboard() {
       const canvasRef = useRef(null);
+      const offscreenCanvas = useRef(document.createElement('canvas'));
       const [isDrawing, setIsDrawing] = useState(false);
       const [color, setColor] = useState('#000000');
       const [brushSize, setBrushSize] = useState(5);
@@ -25,19 +27,31 @@
       const [startPan, setStartPan] = useState(null);
       const socketRef = useRef(null);
       const currentPath = useRef(null);
+      const paths = useRef([]);
+
+      // Debounce function for event throttling
+      const debounce = (func, wait) => {
+        let timeout;
+        return (...args) => {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+      };
 
       useEffect(() => {
         // Initialize Socket.IO
         socketRef.current = io(window.location.origin);
 
         // Load existing paths
-        socketRef.current.on('loadPaths', (paths) => {
+        socketRef.current.on('loadPaths', (loadedPaths) => {
+          paths.current = loadedPaths;
           const ctx = canvasRef.current.getContext('2d');
-          redrawCanvas(ctx, paths);
+          redrawCanvas(ctx);
         });
 
         // Receive real-time drawing updates
         socketRef.current.on('draw', (path) => {
+          paths.current.push(path);
           const ctx = canvasRef.current.getContext('2d');
           drawPath(ctx, path);
         });
@@ -61,7 +75,55 @@
         // Request initial paths
         socketRef.current.emit('requestPaths');
 
+        // Batch Socket.IO updates
+        const interval = setInterval(() => {
+          if (currentPath.current) {
+            socketRef.current.emit('draw', currentPath.current);
+            paths.current.push(currentPath.current);
+            currentPath.current = null;
+          }
+        }, 100);
+
         // Touch support
+        const handleTouchStart = (e) => {
+          e.preventDefault();
+          const rect = canvasRef.current.getBoundingClientRect();
+          const touch = e.touches[0];
+          const x = (touch.clientX - rect.left - offset.x) / scale;
+          const y = (touch.clientY - rect.top - offset.y) / scale;
+          const clientX = touch.clientX;
+          const clientY = touch.clientY;
+          if (mode === 'pan') {
+            setStartPan({ x: clientX - offset.x, y: clientY - offset.y });
+          } else {
+            startDrawing(x, y);
+          }
+        };
+
+        const handleTouchMove = debounce((e) => {
+          e.preventDefault();
+          const rect = canvasRef.current.getBoundingClientRect();
+          const touch = e.touches[0];
+          const x = (touch.clientX - rect.left - offset.x) / scale;
+          const y = (touch.clientY - rect.top - offset.y) / scale;
+          const clientX = touch.clientX;
+          const clientY = touch.clientY;
+          if (startPan || mode === 'pan') {
+            pan(clientX, clientY);
+          } else if (isDrawing) {
+            draw(x, y);
+          }
+        }, 16);
+
+        const handleTouchEnd = (e) => {
+          e.preventDefault();
+          if (mode === 'pan') {
+            setStartPan(null);
+          } else {
+            stopDrawing();
+          }
+        };
+
         canvas.addEventListener('touchstart', handleTouchStart);
         canvas.addEventListener('touchmove', handleTouchMove);
         canvas.addEventListener('touchend', handleTouchEnd);
@@ -72,6 +134,7 @@
           canvas.removeEventListener('touchstart', handleTouchStart);
           canvas.removeEventListener('touchmove', handleTouchMove);
           canvas.removeEventListener('touchend', handleTouchEnd);
+          clearInterval(interval);
         };
       }, []);
 
@@ -93,13 +156,16 @@
         ctx.restore();
       };
 
-      const redrawCanvas = (ctx, paths = null) => {
+      const redrawCanvas = (ctx) => {
+        const offscreenCtx = offscreenCanvas.current.getContext('2d');
+        offscreenCanvas.current.width = ctx.canvas.width;
+        offscreenCanvas.current.height = ctx.canvas.height;
+        offscreenCtx.clearRect(0, 0, offscreenCanvas.current.width, offscreenCanvas.current.height);
+        offscreenCtx.lineCap = 'round';
+        offscreenCtx.lineJoin = 'round';
+        paths.current.forEach((path) => drawPath(offscreenCtx, path));
         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-        if (paths) {
-          paths.forEach((path) => drawPath(ctx, path));
-        } else {
-          socketRef.current.emit('requestPaths');
-        }
+        ctx.drawImage(offscreenCanvas.current, 0, 0);
       };
 
       const startDrawing = (x, y) => {
@@ -147,10 +213,6 @@
       const stopDrawing = () => {
         if (isDrawing) {
           setIsDrawing(false);
-          if (currentPath.current) {
-            socketRef.current.emit('draw', currentPath.current);
-            currentPath.current = null;
-          }
         }
       };
 
@@ -167,7 +229,7 @@
         }
       };
 
-      const handleMouseMove = (e) => {
+      const handleMouseMove = debounce((e) => {
         const rect = canvasRef.current.getBoundingClientRect();
         const x = (e.clientX - rect.left - offset.x) / scale;
         const y = (e.clientY - rect.top - offset.y) / scale;
@@ -178,7 +240,7 @@
         } else if (isDrawing) {
           draw(x, y);
         }
-      };
+      }, 16);
 
       const handleMouseUp = (e) => {
         if (e.button === 1 || mode === 'pan') {
@@ -200,45 +262,6 @@
         setScale(newScale);
         setOffset({ x: newOffsetX, y: newOffsetY });
         redrawCanvas(canvasRef.current.getContext('2d'));
-      };
-
-      const handleTouchStart = (e) => {
-        e.preventDefault();
-        const rect = canvasRef.current.getBoundingClientRect();
-        const touch = e.touches[0];
-        const x = (touch.clientX - rect.left - offset.x) / scale;
-        const y = (touch.clientY - rect.top - offset.y) / scale;
-        const clientX = touch.clientX;
-        const clientY = touch.clientY;
-        if (mode === 'pan') {
-          startPanning(clientX, clientY);
-        } else {
-          startDrawing(x, y);
-        }
-      };
-
-      const handleTouchMove = (e) => {
-        e.preventDefault();
-        const rect = canvasRef.current.getBoundingClientRect();
-        const touch = e.touches[0];
-        const x = (touch.clientX - rect.left - offset.x) / scale;
-        const y = (touch.clientY - rect.top - offset.y) / scale;
-        const clientX = touch.clientX;
-        const clientY = touch.clientY;
-        if (startPan || mode === 'pan') {
-          pan(clientX, clientY);
-        } else if (isDrawing) {
-          draw(x, y);
-        }
-      };
-
-      const handleTouchEnd = (e) => {
-        e.preventDefault();
-        if (mode === 'pan') {
-          setStartPan(null);
-        } else {
-          stopDrawing();
-        }
       };
 
       return (
